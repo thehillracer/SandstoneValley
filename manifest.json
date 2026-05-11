@@ -1,0 +1,12 @@
+{
+    "name": "SandstoneValley",
+    "version": "1.0.0",
+    "type": "lse-quickjs",
+    "entry": "main.js",
+    "description": "Generates infinite sandstone plots with stone brick borders.",
+    "dependencies": [
+        {
+            "name": "legacy-script-engine-quickjs"
+        }
+    ]
+}
