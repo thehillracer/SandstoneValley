@@ -1,56 +1,63 @@
-// SandstonePlots - LSE QuickJS
 const PLOT_SIZE = 512;
 const Y_LEVEL = -60;
-const CHUNK_RADIUS = 4;
+const CHUNK_RADIUS = 5;
 
 const FILL_BLOCK = "minecraft:sandstone";
 const BORDER_TOP = "minecraft:stone_bricks";
 const BORDER_UNDER = "minecraft:border_block";
 
-let processed = new Set();
-
-// Force-generation timers
-let forceGenUntil = {}; // playerName -> timestamp
-
-// PLOT STORAGE
 const DATA_FILE = "plugins/SandstonePlots/playerPlots.json";
+const FIRST_JOIN_FILE = "plugins/firstJoin.json";
 
+const MAX_PROCESSED = 20000;
+
+let processed = new Set();
+let processedQueue = [];
+let forceGenUntil = {};
 let playerPlots = {};
+let usedPlots = new Set();
+let firstJoinData = {};
+let tickCounter = 0;
+
 try {
     let txt = file.readFrom(DATA_FILE);
-    if (txt && txt.length > 0) {
-        playerPlots = JSON.parse(txt);
-    }
-} catch (e) {
-    playerPlots = {};
-}
+    if (txt && txt.length > 0) playerPlots = JSON.parse(txt);
+} catch (e) {}
+
+for (let n in playerPlots) usedPlots.add(playerPlots[n]);
+
+try {
+    let txt = file.readFrom(FIRST_JOIN_FILE);
+    if (txt && txt.length > 0) firstJoinData = JSON.parse(txt);
+} catch (e) {}
 
 function savePlots() {
     file.writeTo(DATA_FILE, JSON.stringify(playerPlots));
 }
 
-// SPIRAL PLOT ASSIGNMENT
+function saveFirstJoin() {
+    file.writeTo(FIRST_JOIN_FILE, JSON.stringify(firstJoinData));
+}
+
+function trackProcessed(key) {
+    if (processed.has(key)) return;
+    processed.add(key);
+    processedQueue.push(key);
+    if (processedQueue.length > MAX_PROCESSED) {
+        const old = processedQueue.shift();
+        if (old) processed.delete(old);
+    }
+}
+
 function getNextFreePlot() {
     let layer = 0;
-
     while (true) {
         for (let dx = -layer; dx <= layer; dx++) {
             for (let dz = -layer; dz <= layer; dz++) {
-
                 if (Math.abs(dx) !== layer && Math.abs(dz) !== layer) continue;
-
                 let key = dx + "," + dz;
-
-                let used = false;
-                let names = Object.keys(playerPlots);
-                for (let i = 0; i < names.length; i++) {
-                    if (playerPlots[names[i]] === key) {
-                        used = true;
-                        break;
-                    }
-                }
-
-                if (!used) {
+                if (!usedPlots.has(key)) {
+                    usedPlots.add(key);
                     return { px: dx, pz: dz };
                 }
             }
@@ -59,46 +66,32 @@ function getNextFreePlot() {
     }
 }
 
-// PLOT TELEPORT
 function tpToPlot(player, px, pz) {
     let x = Math.floor(px * PLOT_SIZE + PLOT_SIZE / 2);
     let z = Math.floor(pz * PLOT_SIZE + PLOT_SIZE / 2);
-    let y = -50;
-
-    let dim = player.pos.dimid;
-
-    player.teleport(x, y, z, dim);
+    let y = Y_LEVEL + 2;
+    player.teleport(x, y, z, player.pos.dimid);
 }
 
-// WORLD GENERATION
 function processChunk(dimId, chunkX, chunkZ, force) {
     const key = dimId + ":" + chunkX + ":" + chunkZ;
-
-    // Bypass processed check if force == true
     if (!force && processed.has(key)) return;
-
-    processed.add(key);
-
+    trackProcessed(key);
     const startX = chunkX * 16;
     const startZ = chunkZ * 16;
-
     for (let dx = 0; dx < 16; dx++) {
         for (let dz = 0; dz < 16; dz++) {
             const x = startX + dx;
             const z = startZ + dz;
-
             const plotX = Math.floor(x / PLOT_SIZE);
             const plotZ = Math.floor(z / PLOT_SIZE);
-
             const localX = x - plotX * PLOT_SIZE;
             const localZ = z - plotZ * PLOT_SIZE;
-
             const isBorder =
                 localX === 0 ||
                 localZ === 0 ||
                 localX === PLOT_SIZE - 1 ||
                 localZ === PLOT_SIZE - 1;
-
             if (isBorder) {
                 mc.setBlock(x, Y_LEVEL, z, dimId, BORDER_TOP, 0);
                 mc.setBlock(x, Y_LEVEL - 1, z, dimId, BORDER_UNDER, 0);
@@ -109,88 +102,85 @@ function processChunk(dimId, chunkX, chunkZ, force) {
     }
 }
 
-// GENERATE AROUND PLAYERS
-mc.listen("onTick", () => {
-    const players = mc.getOnlinePlayers();
+function preGeneratePlot(dimId, px, pz) {
+    const centerX = Math.floor(px * PLOT_SIZE + PLOT_SIZE / 2);
+    const centerZ = Math.floor(pz * PLOT_SIZE + PLOT_SIZE / 2);
+    const baseCx = Math.floor(centerX / 16);
+    const baseCz = Math.floor(centerZ / 16);
+    for (let ox = -CHUNK_RADIUS; ox <= CHUNK_RADIUS; ox++) {
+        for (let oz = -CHUNK_RADIUS; oz <= CHUNK_RADIUS; oz++) {
+            processChunk(dimId, baseCx + ox, baseCz + oz, true);
+        }
+    }
+}
 
+mc.listen("onTick", () => {
+    tickCounter++;
+    if (tickCounter % 2 !== 0) return;
+    const players = mc.getOnlinePlayers();
     for (const p of players) {
         const pos = p.pos;
         const dimId = pos.dimid;
-
         const baseCx = Math.floor(pos.x / 16);
         const baseCz = Math.floor(pos.z / 16);
-
-        // Check if this player is in force-generation mode
         const force = Date.now() < (forceGenUntil[p.realName] || 0);
-
         for (let ox = -CHUNK_RADIUS; ox <= CHUNK_RADIUS; ox++) {
             for (let oz = -CHUNK_RADIUS; oz <= CHUNK_RADIUS; oz++) {
                 processChunk(dimId, baseCx + ox, baseCz + oz, force);
             }
         }
     }
+    const carts = mc.getAllEntities("minecraft:tnt_minecart");
+    for (const c of carts) c.kill();
 });
 
-// ASSIGN PLOT ON JOIN
 mc.listen("onJoin", function(player) {
     let name = player.realName;
-
-    // Activate force-generation for 5 seconds
     forceGenUntil[name] = Date.now() + 5000;
-
+    const dimId = player.pos.dimid;
     if (!playerPlots[name]) {
         let plot = getNextFreePlot();
         let key = plot.px + "," + plot.pz;
         playerPlots[name] = key;
         savePlots();
-
-        player.tell("You have been assigned plot " + key);
+        preGeneratePlot(dimId, plot.px, plot.pz);
         tpToPlot(player, plot.px, plot.pz);
     } else {
         let parts = playerPlots[name].split(",");
         let px = parseInt(parts[0]);
         let pz = parseInt(parts[1]);
+        preGeneratePlot(dimId, px, pz);
         tpToPlot(player, px, pz);
+    }
+    if (!firstJoinData[name]) {
+        firstJoinData[name] = { firstJoin: Date.now() };
+        saveFirstJoin();
     }
 });
 
-// Remove TNT minecarts efficiently
-mc.listen("onTick", function () {
-    const carts = mc.getAllEntities("minecraft:tnt_minecart");
-    for (const c of carts) c.kill();
-});
-
-mc.listen("onUseItem", function (player, item) {
+mc.listen("onUseItem", function(player, item) {
     if (!item) return;
-
     const id = item.type;
-
-    // Ender pearl
     if (id === "minecraft:ender_pearl") {
         player.tell("Ender pearls are disabled.");
         return false;
     }
-
-    // Chorus fruit
     if (id === "minecraft:chorus_fruit") {
         player.tell("Chorus fruit teleporting is disabled.");
         return false;
     }
 });
 
-mc.listen("onUseItemOn", function (player, item, block) {
+mc.listen("onUseItemOn", function(player, item, block) {
     if (!item) return;
-
     if (item.type.endsWith("_spawn_egg")) {
         player.tell("Spawn eggs are disabled.");
         return false;
     }
 });
 
-// /kit COMMAND
-mc.regPlayerCmd("kit", "Gives a basic redstone kit", function (player, args) {
-    const name = player.realName; // exact in‑game name
-
+mc.regPlayerCmd("kit", "Gives a basic redstone kit", function(player, args) {
+    const name = player.realName;
     const cmds = [
         `give "${name}" repeater 1`,
         `give "${name}" white_wool 1`,
@@ -202,44 +192,6 @@ mc.regPlayerCmd("kit", "Gives a basic redstone kit", function (player, args) {
         `give "${name}" target 1`,
         `give "${name}" stone_slab 1`
     ];
-
-    for (const c of cmds) {
-        mc.runcmdEx(c);
-    }
-
-    player.tell("§aYou received your redstone kit!");
-});
-
-// FIRST JOIN TAGGING SYSTEM
-const FIRST_JOIN_FILE = "plugins/firstJoin.json";
-let firstJoinData = {};
-
-// Load existing data
-try {
-    let txt = file.readFrom(FIRST_JOIN_FILE);
-    if (txt && txt.length > 0) {
-        firstJoinData = JSON.parse(txt);
-    }
-} catch (e) {
-    firstJoinData = {};
-}
-
-function saveFirstJoin() {
-    file.writeTo(FIRST_JOIN_FILE, JSON.stringify(firstJoinData));
-}
-
-// Give worldedit tag on first join
-mc.listen("onJoin", function (player) {
-    const name = player.realName;
-
-    if (!firstJoinData[name]) {
-        // Mark as joined
-        firstJoinData[name] = true;
-        saveFirstJoin();
-
-        // Run the tag command
-        mc.runcmdEx(`tag "${name}" add worldedit`);
-
-        player.tell("§aYou have been granted the worldedit tag for the first time!");
-    }
+    for (const c of cmds) mc.runcmdEx(c);
+    player.tell("§aYou received your enhanced redstone kit!");
 });
